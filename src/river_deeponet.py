@@ -1070,7 +1070,7 @@ class RiverOperatorSurrogate(nn.Module):
         print(f"   Mean observation coverage={avg_obs*100:.1f}%", flush=True)
 
     # ----------------------------------------------------------
-    # 河网拓扑：参考 v3，自动切分内部连接点
+    # River topology and automatic splitting at internal connections
     # ----------------------------------------------------------
 
     def _build_network_topology(self):
@@ -1178,7 +1178,7 @@ class RiverOperatorSurrogate(nn.Module):
                 row_id += 1
 
             self.reach_row_indices[reach_name] = rows
-            # 该坐标仅保留给结果索引和旧静态通道；DeepONet 不使用此人工平移坐标。
+            # This display coordinate is not used by DeepONet.
             global_cursor += reach_len + 1.0e3
 
         for sec_id, occs in self.section_occurrences.items():
@@ -1283,7 +1283,7 @@ class RiverOperatorSurrogate(nn.Module):
 
     @staticmethod
     def _multi_source_dijkstra(adjacency, sources):
-        """在带权河网图上计算多源最短路径。"""
+        """Compute weighted multi-source shortest paths on the river graph."""
         n_nodes = len(adjacency)
         distance = np.full(n_nodes, np.inf, dtype=float)
         queue = []
@@ -1306,10 +1306,10 @@ class RiverOperatorSurrogate(nn.Module):
 
     def _build_physical_topology_features(self):
         """
-        基于真实河段距离构建拓扑度量。
+        Build topology metrics from physical reach distances.
 
-        有向边沿河段上游到下游；汊点处以上游河段尾节点连接下游河段首节点，
-        连接距离为 0。由此计算到上下游边界的水力路径距离。
+        Directed edges follow downstream flow. Zero-length junction edges join
+        upstream reach tails to downstream reach heads.
         """
         n_nodes = len(self.row_sec_ids)
         downstream_graph = [[] for _ in range(n_nodes)]
@@ -1340,7 +1340,7 @@ class RiverOperatorSurrogate(nn.Module):
                     u, v = int(upstream_row), int(downstream_row)
                     downstream_graph[u].append((v, 0.0))
                     upstream_graph[v].append((u, 0.0))
-            # 最近汊点距离使用无向拓扑，汊点各出现位置视为同一物理节点。
+            # Junction occurrences represent one physical node.
             for i, u in enumerate(rows):
                 for v in rows[i + 1:]:
                     undirected_graph[u].append((v, 0.0))
@@ -1360,8 +1360,7 @@ class RiverOperatorSurrogate(nn.Module):
         self.distance_to_junction_m = self._multi_source_dijkstra(
             undirected_graph, junction_rows)
 
-        # 为每个上下游边界分别计算可达路径。上游边界沿水流方向传播，
-        # 下游水位沿反向图表达回水影响。
+        # Upstream signals use forward paths; downstream stages use reverse paths.
         route_columns = []
         route_names = []
         upper_count = 0
@@ -1417,7 +1416,7 @@ class RiverOperatorSurrogate(nn.Module):
         self.boundary_route_weights_array = route_weights
         self.boundary_lag_fraction_array = route_lag_fraction
 
-        # 若河网方向或边界配置不完整，使用无向真实路径补足，不引入人工坐标。
+        # Fall back to undirected physical paths for incomplete direction data.
         undirected_up = self._multi_source_dijkstra(
             undirected_graph, upper_rows)
         undirected_low = self._multi_source_dijkstra(
@@ -1457,9 +1456,7 @@ class RiverOperatorSurrogate(nn.Module):
             sec_id = int(sec_id)
             self.sec_id_to_lut_idx[sec_id] = i
             z_min = float(self.dl.cross_sections[sec_id]["Z_min"])
-            # 原代码最高水位只到实测断面最高点，query 时超过最高点会被 clamp。
-            # 本版把水力表预生成到 Z_max + overbank_height；几何由 HydraulicCalculator 按
-            # vertical/slope 模式扩展，再重新计算 A/B/K。
+            # Extend lookup tables above surveyed banks using the selected mode.
             z_max = float(self.calc.geometry_upper_level(sec_id))
             if z_max <= z_min + 1e-3:
                 z_max = z_min + 1.0
@@ -1471,7 +1468,7 @@ class RiverOperatorSurrogate(nn.Module):
             As = np.asarray(As, dtype=float)
             Bs = np.asarray(Bs, dtype=float)
             Ks = np.asarray(Ks, dtype=float)
-            # 轻量一致性检查：A/K 应非减；若由于断面点异常导致局部回落，做保守单调修正。
+            # Enforce nondecreasing area and conveyance.
             As = np.maximum.accumulate(As)
             Ks = np.maximum.accumulate(Ks)
             Bs = np.maximum(Bs, 1e-3)
@@ -1484,7 +1481,7 @@ class RiverOperatorSurrogate(nn.Module):
               f"height={self.overbank_height} m", flush=True)
 
     # ----------------------------------------------------------
-    # 文件解析
+    # File parsing
     # ----------------------------------------------------------
 
     @staticmethod
@@ -1496,7 +1493,7 @@ class RiverOperatorSurrogate(nn.Module):
 
     @staticmethod
     def _csv_path(file_path):
-        """返回标准 CSV 路径；可选输入为 None 时直接返回 None。"""
+        """Return a validated CSV path, preserving optional None values."""
         if file_path is None:
             return None
         path = str(file_path)
@@ -1517,7 +1514,7 @@ class RiverOperatorSurrogate(nn.Module):
         return None
 
     def _row_for_occurrence_name(self, name):
-        """将 55_sec2_0 这类“断面_河段_局部序号”解析为唯一河网节点行。"""
+        """Resolve names such as 55_sec2_0 to unique network rows."""
         text = str(name).strip()
         parts = text.split('_')
         if len(parts) < 3:
@@ -1537,11 +1534,10 @@ class RiverOperatorSurrogate(nn.Module):
 
     def _rows_for_node_identifier(self, identifier):
         """
-        将 CSV 中的断面标识解析为河网节点行。
+        Resolve a CSV section identifier to network rows.
 
-        普通断面号（如 55）只对应其代表行；带河段和局部序号的节点名
-        （如 55_sec2_0）对应唯一出现位置。这样同一物理断面在多个河段
-        出现时，各端口可以保留各自独立的流量过程。
+        A numeric section selects its representative row. A composite identifier
+        such as 55_sec2_0 selects one explicit reach occurrence.
         """
         text = str(identifier).strip()
         if not text:
@@ -1562,7 +1558,7 @@ class RiverOperatorSurrogate(nn.Module):
         return [int(representative)], sec_id
 
     def _filter_resolved_rows(self, rows, observed_filter, sec_id):
-        """按训练监督配置过滤已经精确解析的节点行。"""
+        """Filter resolved rows using the supervision configuration."""
         if observed_filter is None:
             return list(rows)
         representative = self.section_representative_row.get(int(sec_id))
@@ -1577,7 +1573,7 @@ class RiverOperatorSurrogate(nn.Module):
         return selected
 
     def _compile_observed_sections_filter(self, observed_sections):
-        """支持普通断面号 55，也支持汊点节点名 55_sec2_0。"""
+        """Support numeric sections and composite junction-node names."""
         if observed_sections is None:
             return None
         section_ids, row_ids, unresolved = set(), set(), []
@@ -1600,8 +1596,8 @@ class RiverOperatorSurrogate(nn.Module):
                 if len(self.row_indices_by_section.get(self.row_sec_ids[i], [])) > 1
             ]
             raise ValueError(
-                f"无法识别监督断面/汊点节点: {unresolved}。"
-                f"可用重复断面节点示例: {available[:20]}"
+                f"Unrecognized observation or junction nodes: {unresolved}. "
+                f"Examples of repeated nodes: {available[:20]}"
             )
         return {'sections': section_ids, 'rows': row_ids}
 
@@ -1611,8 +1607,7 @@ class RiverOperatorSurrogate(nn.Module):
             return rows
         selected = [r for r in rows if r in observed_filter['rows']]
         if int(sec_id) in observed_filter['sections']:
-            # 普通断面号只选代表行；若要支流/汊点上的另一个出现位置，
-            # 请显式使用 55_sec2_0 这样的节点名称。
+            # Composite names select a specific repeated junction occurrence.
             rep = self.section_representative_row.get(int(sec_id))
             if rep is not None and int(rep) not in selected:
                 selected.insert(0, int(rep))
@@ -1620,9 +1615,8 @@ class RiverOperatorSurrogate(nn.Module):
 
     def _parse_boundary_file(self, file_path):
         """
-        读取边界 CSV。
-        标准列：断面号、边界类型、时间、流量、水位。
-        模型输入仅使用上游流量 Q 和下游水位 Z。
+        Read a boundary CSV. The model uses upstream discharge and downstream
+        water level as boundary inputs.
         """
         upper_sections = set(self.upper_boundary_sections_sorted)
         lower_sections = set(self.lower_boundary_sections_sorted)
@@ -1633,17 +1627,17 @@ class RiverOperatorSurrogate(nn.Module):
 
         cols = list(df.columns)
         sec_col = self._pick_csv_column(
-            cols, ['section_id', '断面号', '断面'], 0)
+            cols, ['section_id'], 0)
         type_col = self._pick_csv_column(
-            cols, ['boundary_type', '边界类型', '边界'])
+            cols, ['boundary_type'])
         time_col = self._pick_csv_column(
-            cols, ['time_hours', 'time', '时间'],
+            cols, ['time_hours', 'time'],
             2 if type_col is not None else 1)
         q_col = self._pick_csv_column(
-            cols, ['discharge_m3s', 'discharge', '流量'],
+            cols, ['discharge_m3s', 'discharge'],
             3 if type_col is not None else 2)
         z_col = self._pick_csv_column(
-            cols, ['water_level_m', 'water_level', '水位'],
+            cols, ['water_level_m', 'water_level'],
             4 if type_col is not None else 3)
 
         upper_data, lower_data = {}, {}
@@ -1671,9 +1665,9 @@ class RiverOperatorSurrogate(nn.Module):
                 if type_col is not None else ''
             )
             is_downstream = (
-                'downstream' in boundary_text or '下' in boundary_text)
+                'downstream' in boundary_text)
             is_upstream = (
-                'upstream' in boundary_text or '上' in boundary_text)
+                'upstream' in boundary_text)
             if sec_id in upper_sections and not is_downstream:
                 upper_data[sec_id] = {'time': t, 'discharge': q, 'water_level': z}
             if sec_id in lower_sections and not is_upstream:
@@ -1683,8 +1677,8 @@ class RiverOperatorSurrogate(nn.Module):
         missing_lower = sorted(lower_sections - set(lower_data))
         if missing_upper or missing_lower:
             raise ValueError(
-                f"边界 CSV {csv_path} 缺少必要断面: "
-                f"上边界缺失={missing_upper}, 下边界缺失={missing_lower}"
+                f"Boundary CSV {csv_path} is incomplete: "
+                f"missing upstream={missing_upper}, downstream={missing_lower}"
             )
         return upper_data, lower_data
 
@@ -1698,11 +1692,11 @@ class RiverOperatorSurrogate(nn.Module):
 
         cols = list(df.columns)
         sec_col = self._pick_csv_column(
-            cols, ['section_id', '断面号', '断面'], 0)
+            cols, ['section_id'], 0)
         time_col = self._pick_csv_column(
-            cols, ['time_hours', 'time', '时间'], 1)
+            cols, ['time_hours', 'time'], 1)
         q_col = self._pick_csv_column(
-            cols, ['discharge_m3s', 'discharge', '流量'], 2)
+            cols, ['discharge_m3s', 'discharge'], 2)
         lateral = {}
         tmp = df[[sec_col, time_col, q_col]].copy()
         tmp.columns = ['section_id', 'time_hours', 'discharge_m3s']
@@ -1729,13 +1723,13 @@ class RiverOperatorSurrogate(nn.Module):
 
         cols = list(df.columns)
         sec_col = self._pick_csv_column(
-            cols, ['section_id', '断面号', '断面'], 0)
+            cols, ['section_id'], 0)
         time_col = self._pick_csv_column(
-            cols, ['time_hours', 'time', '时间'], 1)
+            cols, ['time_hours', 'time'], 1)
         z_col = self._pick_csv_column(
-            cols, ['water_level_m', 'water_level', '水位'], 2)
+            cols, ['water_level_m', 'water_level'], 2)
         q_col = self._pick_csv_column(
-            cols, ['discharge_m3s', 'discharge', '流量'], 3)
+            cols, ['discharge_m3s', 'discharge'], 3)
         row_series, t_union = {}, []
         unresolved_identifiers = []
         for sid, group in df.dropna(
@@ -1839,18 +1833,14 @@ class RiverOperatorSurrogate(nn.Module):
         lateral_dict = self._parse_lateral_file(spec.lateral_inflow_file)
 
         # ------------------------------------------------------
-        # 关键区分：监督目标 vs. 参考评价目标
+        # Keep supervision targets separate from evaluation-only references.
         # ------------------------------------------------------
-        # reference_*：只要 result_file 存在，就读取全断面结果。
-        #              它只用于验证/测试评价和 save_training_results，不作为网络输入，
-        #              也不自动参与训练 data loss。
+        # Reference targets are loaded for evaluation and result export only.
         t_ref, z_ref, q_ref, ref_indices = self._parse_result_file_sparse(
             spec.result_file, observed_sections_set=None)
 
-        # observed_sections 三种语义：
-        #   None  : result_file 中所有可读取断面作为训练监督目标；
-        #   []    : 明确不使用任何实测/参考结果作为训练监督，result_file 仅作为评价答案；
-        #   [...] : 只使用指定断面作为稀疏训练监督。
+        # None means full supervision, [] means no observation supervision,
+        # and a list selects sparse supervised sections.
         if spec.observed_sections is None:
             t_res, z_target, q_target, obs_indices = t_ref, z_ref, q_ref, list(ref_indices or [])
         elif len(spec.observed_sections) == 0:
@@ -1861,8 +1851,7 @@ class RiverOperatorSurrogate(nn.Module):
             t_res, z_target, q_target, obs_indices = self._parse_result_file_sparse(
                 spec.result_file, observed_sections_set=obs_set)
 
-        # 时间轴：预测输入仍只包含边界、初值、旁侧等可用信息；
-        # 这里把 reference 时间加入 union 仅用于后续评价插值，数值本身不会进入 input_grid。
+        # Reference times are included only to align later evaluation.
         t_union = []
         if t_ref is not None:
             t_union.extend(t_ref.tolist())
@@ -1905,7 +1894,7 @@ class RiverOperatorSurrogate(nn.Module):
                 for r in self.row_indices_by_section[sec_id]:
                     lateral[r, :] += q_lat
 
-        # 训练监督目标插值到统一时间轴。只有 obs_indices 对应的行有意义。
+        # Interpolate supervision targets onto the shared event time axis.
         if z_target is not None and q_target is not None:
             z_t = np.zeros((N, len(t_union)), dtype=float)
             q_t = np.zeros((N, len(t_union)), dtype=float)
@@ -1915,7 +1904,7 @@ class RiverOperatorSurrogate(nn.Module):
                     q_t[i, :] = np.interp(t_union, t_res, q_target[i])
             z_target, q_target = z_t, q_t
 
-        # 全断面参考目标插值到统一时间轴。只用于评价，不参与输入和训练监督。
+        # Interpolate full references for evaluation only.
         reference_z, reference_q = None, None
         reference_indices = list(ref_indices or [])
         if z_ref is not None and q_ref is not None:
@@ -1936,7 +1925,7 @@ class RiverOperatorSurrogate(nn.Module):
                     z0 = self.z_bed_array + 1.0
                 q0 = np.repeat(q_up[0], N)
             elif reference_z is not None and len(reference_indices) > 0:
-                # 如果没有初值文件，但有参考结果，可只用 t=0 作为初值；这不属于预测期辅助观测。
+                # A reference at t=0 may initialize an otherwise missing state.
                 z0 = reference_z[:, 0].copy()
                 q0 = reference_q[:, 0].copy()
             else:
@@ -1977,17 +1966,16 @@ class RiverOperatorSurrogate(nn.Module):
         self.raw_events = [self._load_single_event(spec) for spec in self.event_specs]
 
     # ----------------------------------------------------------
-    # 归一化与输入构建
+    # Normalization and input construction
     # ----------------------------------------------------------
 
     def _event_scale_features(self, evt: RawEvent):
         """
-        仅基于边界、初始条件和源项计算事件尺度特征。
-        不使用 target_z/target_q，避免在验证/预测阶段引入目标信息。
+        Compute event-scale features from boundaries, initial states, and sources.
+        Targets are excluded to prevent information leakage.
         """
         q_candidates = []
-        # 只使用预测阶段可用的边界流量：上游 Q。
-        # 下游 Q 属于预测阶段不可用量，不参与事件尺度 conditioning。
+        # Only upstream discharge is available during prediction.
         for arr in evt.upper_q.values():
             q_candidates.append(np.asarray(arr, dtype=float).reshape(-1))
         if evt.q0 is not None and len(evt.q0) > 0:
@@ -2011,8 +1999,7 @@ class RiverOperatorSurrogate(nn.Module):
         q_scale_evt = max(q_abs_max, 20.0)
 
         h_range_evt = 0.1
-        # 只使用预测阶段可用的边界水位：下游 Z/h。
-        # 上游 Z 属于预测阶段不可用量，不参与事件尺度 conditioning。
+        # Only downstream stage/depth is available during prediction.
         for sec, z in evt.lower_z.items():
             if sec not in self.section_z_bed:
                 continue
@@ -2037,13 +2024,13 @@ class RiverOperatorSurrogate(nn.Module):
 
     def _compute_normalization(self):
         """
-        归一化参数只从训练事件估计。
+        Estimate normalization parameters from training events only.
 
-        本版主状态量不再使用 asinh，而采用训练条件仿射尺度：
+        State variables use affine scaling based on the training conditions:
           q_norm = (Q - q_center) / q_scale
           h_norm = (h - h_center) / h_scale
           source_norm = (q_lat - source_center) / source_scale
-        PDE 残差始终在反归一化后的物理空间计算。
+        Physical evaluation metrics use de-normalized values.
         """
         if self.train_event_names:
             train_name_set = set(self.train_event_names)
@@ -2222,12 +2209,9 @@ class RiverOperatorSurrogate(nn.Module):
 
     def _set_time_grid_from_events(self):
         """
-        批量训练需要统一张量尺寸，同时保留每个事件的真实时间步信息。
-        因此本版本不再把所有事件重采样到 256 点，而是：
-          1) 读取每个事件原始逐小时时间序列长度；
-          2) 训练时统一 padding 到 max_T；
-          3) padding 段由最后一个有效值恒定延长；
-          4) time_mask=0 的部分不参与监督损失或基础一致性正则。
+        Preserve native event time steps while using a shared tensor size.
+        Shorter events are padded with their final value, and time_mask excludes
+        padding from supervision and consistency regularization.
         """
         if len(self.raw_events) == 0:
             raise RuntimeError("Load events before configuring the time grid")
@@ -2279,7 +2263,7 @@ class RiverOperatorSurrogate(nn.Module):
         return out
 
     def _build_lateral_features(self, lateral_q):
-        """把断面旁侧流量转换为源项密度通道，并构造 reach 内累计旁侧通道。"""
+        """Build local and cumulative lateral-source channels for a reach."""
         N, T = lateral_q.shape
         lat_density = np.zeros_like(lateral_q)
         lat_cum = np.zeros_like(lateral_q)
@@ -2301,7 +2285,7 @@ class RiverOperatorSurrogate(nn.Module):
                 reach_lat[cell, :] += density
                 reach_cum[j:, :] += q
 
-            # 将 cell 源项写到相邻两个断面行，使半单元平均后仍近似为该源项
+            # Apply each cell source to its two neighboring section rows.
             for c in range(len(rows) - 1):
                 lat_density[rows[c], :] += reach_lat[c, :]
                 lat_density[rows[c + 1], :] += reach_lat[c, :]
@@ -2312,15 +2296,12 @@ class RiverOperatorSurrogate(nn.Module):
 
     def _build_input_grid_for_event(self, evt: RawEvent, i_evt_for_conditioning: Optional[int] = None):
         """
-        构建单事件输入网格。
+        Build the input grid for one event.
 
-        当前版本的边界输入严格与预测阶段一致：
-          - 上游边界只输入 Q_up；
-          - 下游边界只输入 Z_low/h_low；
-          - 上游 Z_up/h_up 和下游 Q_low 不进入神经算子输入，也不进入事件 conditioning。
-
-        其他仍作为输入的信息包括：河网/断面静态特征、tau/time_mask/dt_hours、旁侧入流、
-        初始条件 h0/q0、duration、以及基于可用边界与源项计算的事件尺度 conditioning。
+        Boundary inputs match prediction-time availability: upstream discharge
+        and downstream stage/depth. Other channels include static topology,
+        normalized time, masks, lateral sources, initial states, duration, and
+        event-scale conditioning features.
         """
         if self.n_time_model is None:
             raise RuntimeError(
@@ -2335,7 +2316,7 @@ class RiverOperatorSurrogate(nn.Module):
         time_mask_1d[:valid_T] = 1.0
         tau_model = np.linspace(0.0, 1.0, Tm, dtype=float)
 
-        # 只构造预测阶段可用边界：上游 Q、下游 Z。padding 段用末值恒定延长。
+        # Pad prediction-time boundary series with their final value.
         up_q_m, low_z_m = {}, {}
         for sec in self.upper_boundary_sections_sorted:
             up_q_m[sec] = self._pad_1d_last(evt.upper_q[sec], Tm)
@@ -2378,14 +2359,13 @@ class RiverOperatorSurrogate(nn.Module):
         grid[self.CHANNELS['time_mask'], :, :] = time_mask_1d[None, :]
         grid[self.CHANNELS['dt_hours'], :, :] = float(dt_h)
 
-        # 聚合可用边界通道：上游 Q + 下游 h/Z。
+        # Aggregate available upstream-Q and downstream-stage channels.
         grid[self.CHANNELS['q_up'], :, :] = self._norm_q(q_up)[None, :]
         grid[self.CHANNELS['h_low'], :, :] = self._norm_h(h_low)[None, :]
         grid[self.CHANNELS['q_up_evt'], :, :] = self._norm_q_evt(q_up, q_scale_evt)[None, :]
         grid[self.CHANNELS['h_low_rel'], :, :] = self._norm_h_rel_evt(h_low, h_range_evt)[None, :]
 
-        # 源项与初值：全局尺度 + 事件相对尺度。预测阶段也必须提供相同的旁侧流量和初始值文件；
-        # 若缺失，代码会退化为 0 旁侧入流或默认初值，这将改变输入分布。
+        # Use global and event-relative scales for sources and initial states.
         grid[self.CHANNELS['lateral'], :, :] = self._norm_source(lat_density)
         grid[self.CHANNELS['lateral_cum'], :, :] = self._norm_source(lat_cum)
         grid[self.CHANNELS['node_source'], :, :] = self._norm_source(node_source)
@@ -2400,7 +2380,7 @@ class RiverOperatorSurrogate(nn.Module):
         grid[self.CHANNELS['log_qmax_evt'], :, :] = (log_qmax - self.log_qmax_center) / self.log_qmax_scale
         grid[self.CHANNELS['log_hrange_evt'], :, :] = (log_hrange - self.log_hrange_center) / self.log_hrange_scale
 
-        # 多边界可用通道：上游只写 Q，下游只写 h/Z；不可用的上游 h 与下游 Q 不存在于 CHANNELS。
+        # Populate one pair of channels per available external boundary.
         for sec in self.upper_boundary_sections_sorted:
             grid[self.CHANNELS[f'up_{sec}_q'], :, :] = self._norm_q(up_q_m[sec])[None, :]
             grid[self.CHANNELS[f'up_{sec}_q_evt'], :, :] = self._norm_q_evt(up_q_m[sec], q_scale_evt)[None, :]
@@ -2442,14 +2422,14 @@ class RiverOperatorSurrogate(nn.Module):
 
             obs_mask = np.zeros((len(self.row_sec_ids), self.n_time_model), dtype=np.float32)
             if evt.observed_section_indices is None:
-                # None：若存在 target_grid，则全断面监督。
+                # None selects all available target rows.
                 if target_grid is not None:
                     obs_mask[:, :valid_T] = 1.0
             elif len(evt.observed_section_indices) == 0:
-                # []：明确无监测监督。即使 result_file 存在，也只用于后处理参考对比，不进入 data loss。
+                # [] keeps targets for evaluation but excludes them from training.
                 pass
             else:
-                # [sec...]：稀疏监督。
+                # A list selects sparse supervised sections.
                 for idx in evt.observed_section_indices:
                     obs_mask[idx, :valid_T] = 1.0
             reference_mask = np.zeros((len(self.row_sec_ids), self.n_time_model), dtype=np.float32)
@@ -2469,7 +2449,7 @@ class RiverOperatorSurrogate(nn.Module):
                 time_mask=time_mask_tensor, valid_T=valid_T, dt_hours=dt_h))
 
     def _build_query_coords(self):
-        """构建基于真实水力路径和河网拓扑的 DeepONet 查询坐标。"""
+        """Build DeepONet query coordinates from physical topology metrics."""
         tau = np.linspace(0.0, 1.0, self.n_time_model, dtype=np.float32)
         n_nodes = len(self.row_sec_ids)
         n_reaches = len(self.reach_names)
@@ -2529,7 +2509,7 @@ class RiverOperatorSurrogate(nn.Module):
         )
 
     def _build_deeponet_model(self):
-        """在河网拓扑建立后创建 DeepONet。"""
+        """Create the DeepONet after constructing the river topology."""
         n_nodes = len(self.row_sec_ids)
         n_reaches = len(self.reach_names)
         reach_membership = torch.zeros(
@@ -2542,7 +2522,7 @@ class RiverOperatorSurrogate(nn.Module):
         for node in self.junctions.values():
             junction_mask[node['rows']] = 1.0
 
-        # 人工平移的 x_global/x_norm 和数值化 reach_norm 不进入 branch。
+        # Display-only global coordinates are excluded from the branch encoder.
         excluded = {'x_norm', 'x_global_norm', 'reach_norm'}
         branch_channels = [
             index for name, index in self.CHANNELS.items()
@@ -2569,7 +2549,7 @@ class RiverOperatorSurrogate(nn.Module):
             device=self.device,
         )
 
-        # 构建真实相邻断面边和汊点连接边。
+        # Build physical neighboring-section and junction edges.
         edge_src, edge_dst, edge_dx, raw_attrs = [], [], [], []
 
         def append_edge(src, dst, dx_m, slope, roughness, direction, junction):
@@ -2674,7 +2654,7 @@ class RiverOperatorSurrogate(nn.Module):
         )
 
     # ----------------------------------------------------------
-    # 前向、硬约束和损失
+    # Forward pass, hard constraints, and losses
     # ----------------------------------------------------------
 
     def _split_indices(self):
@@ -2707,14 +2687,14 @@ class RiverOperatorSurrogate(nn.Module):
         return set(rows)
 
     def _apply_boundary_hard_injection(self, pred, x):
-        """外边界 + 初始条件 + 汊点水位连续/流量守恒硬约束。"""
+        """Apply initial, external-boundary, and junction hard constraints."""
         pred = pred.clone()
 
-        # 初始条件
+        # Initial conditions.
         pred[:, 0, :, 0] = x[:, self.CHANNELS['h0'], :, 0]
         pred[:, 1, :, 0] = x[:, self.CHANNELS['q0'], :, 0]
 
-        # 多上边界：Q 硬注入
+        # Prescribed discharge at upstream boundaries.
         for sec in self.upper_boundary_sections_sorted:
             rows = self.row_indices_by_section.get(sec, [])
             if not rows:
@@ -2723,7 +2703,7 @@ class RiverOperatorSurrogate(nn.Module):
             for r in rows:
                 pred[:, 1, r, :] = x[:, ch, r, :]
 
-        # 多下边界：h/Z 硬注入
+        # Prescribed stage/depth at downstream boundaries.
         for sec in self.lower_boundary_sections_sorted:
             rows = self.row_indices_by_section.get(sec, [])
             if not rows:
@@ -2735,7 +2715,7 @@ class RiverOperatorSurrogate(nn.Module):
         if len(self.junctions) == 0:
             return pred
 
-        # 转为物理量后做汊点投影，再转回归一化输出
+        # Project junction states in physical units, then normalize again.
         B_, _, N, T = pred.shape
         h = torch.clamp(self._denorm_h(pred[:, 0]), min=0.01)
         Z = h + self.z_bed_tensor.view(1, N, 1)
@@ -2756,7 +2736,7 @@ class RiverOperatorSurrogate(nn.Module):
             endpoint_meta = node['endpoint_meta']
             rows = [m['row'] for m in endpoint_meta]
 
-            # 水位连续：有下边界水位时以固定边界为准；否则取均值
+            # Enforce stage continuity at each junction.
             z_fixed_rows = [r for r in rows if r in fixed_z_rows_global]
             if z_fixed_rows:
                 z_target = Z[:, z_fixed_rows[0]:z_fixed_rows[0] + 1, :]
@@ -2766,9 +2746,7 @@ class RiverOperatorSurrogate(nn.Module):
                 if (r not in z_fixed_rows) or (not z_fixed_rows):
                     Z[:, r:r + 1, :] = z_target
 
-            # 汊点作为内部水动力节点处理：
-            # 汇流时由全部上游流量确定下游总流量；
-            # 分流时保留模型预测的分流比例，只修正下游总量。
+            # Preserve predicted branch ratios while enforcing total discharge.
             ordered_rows, signs, q_fixed_rows = [], [], []
             for m in endpoint_meta:
                 row = m['row']
@@ -2784,7 +2762,7 @@ class RiverOperatorSurrogate(nn.Module):
             free_mask = 1.0 - fixed_mask
             denom = torch.sum((signs_t ** 2) * free_mask, dim=1, keepdim=True)
 
-            # node source 从输入通道读取；同一节点端点行填的是同一值，取第一个端点行即可
+            # Every occurrence carries the same node-source value.
             node_src_norm = x[:, self.CHANNELS['node_source'], rows[0], :]
             node_src = self._denorm_source(node_src_norm).view(x.shape[0], 1, x.shape[-1])
             upstream_pos = [
@@ -3071,8 +3049,7 @@ class RiverOperatorSurrogate(nn.Module):
                         if self.boundary_hard_injection:
                             pred = self._apply_boundary_hard_injection(pred, x)
 
-                        # 验证集的参考数据误差：使用 ref_y/ref_mask。
-                        # ref_y 来自 result_file，只作为“答案”计算误差，不进入 input_grid，也不参与训练反传。
+                        # Validation references are never model inputs.
                         ref_y = batch['ref_y'].to(self.device)
                         ref_mask = batch['ref_mask'].to(self.device)
                         if ref_mask.sum() > 0:
@@ -3097,13 +3074,13 @@ class RiverOperatorSurrogate(nn.Module):
                         total_v_pde += v_pde.item()
 
                         if str(val_metric_mode).lower() in ['reference_data', 'data', 'ref'] and ref_mask.sum() > 0:
-                            # 最佳模型以物理单位 RMSE 为主；PDE 单独监控。
+                            # Select the best model primarily by physical RMSE.
                             v_metric = (
                                 v_physical_score
                                 + (v_pde if val_include_pde else 0.0)
                             )
                         else:
-                            # 没有参考答案时，退回 PDE 验证指标。
+                            # Fall back to consistency loss without references.
                             v_metric = v_pde
 
                         total_v += float(v_metric.item() if torch.is_tensor(v_metric) else v_metric)
@@ -3127,7 +3104,7 @@ class RiverOperatorSurrogate(nn.Module):
             if ep <= warmup_epochs:
                 warmup_scheduler.step()
             else:
-                # 有验证集时，学习率按验证损失调度；无验证集时退回训练损失。
+                # Schedule by validation loss, or training loss without validation.
                 plateau_scheduler.step(metric)
 
             if metric < best_val - min_delta:
@@ -3511,35 +3488,30 @@ def add_case_events(
     skip_missing=True,
 ):
     """
-    批量读取目录下的通用案例，并追加注册到 surrogate.event_specs。
+    Register a numbered collection of case directories.
 
-    该函数不会删除或替换前面手动 add_event_sparse() 注册的事件，
-    只是额外追加批量案例。因此可以同时保留手动场景和批量生成场景。
+    Existing manually registered events are preserved.
 
-    参数说明
-    --------
+    Parameters
+    ----------
     root_dir : str
-        包含“case1、case2、...”等案例文件夹的上一级目录。
-        若脚本就在该目录下运行，保持 '.' 即可。
+        Parent directory containing numbered case folders.
     start_id, end_id : int
-        批量案例编号范围，例如 1~50。
+        Inclusive range of case identifiers.
     case_prefix : str
-        案例文件夹名前缀，默认识别“case1”到“case50”。
+        Prefix before each zero-padded case identifier.
     event_prefix : str
-        注册到模型中的事件名前缀。默认生成 event_001 等，
-        避免和手动 event_01、event_02 冲突。
+        Prefix used for registered event names.
     observed_sections : None | [] | list[int]
-        与 add_event_sparse 的语义完全一致：
-        - None        : result_file 中所有断面参与全监督；
-        - []          : 有参考结果但不参与监督；
-        - [1, 38]     : 只使用指定断面稀疏监督。
+        None selects full supervision, an empty list selects no observation
+        supervision, and a list selects sparse sections.
     skip_missing : bool
-        True 时跳过缺文件案例；False 时遇到缺文件直接报错。
+        Skip incomplete cases when true; otherwise raise an error.
 
-    返回
-    ----
+    Returns
+    -------
     added_names : list[str]
-        实际成功注册的批量事件名。
+        Names of successfully registered events.
     """
     root_dir = os.path.abspath(root_dir)
     added_names = []
@@ -3587,7 +3559,7 @@ def add_case_events(
 
 
 def split_events(names, validation_case_ids):
-    """按照案例编号拆分训练集和验证集。"""
+    """Split registered event names into training and validation sets."""
     validation_case_ids = {int(x) for x in validation_case_ids}
     train_names, val_names, matched_ids = [], [], set()
 
@@ -3609,7 +3581,7 @@ def split_events(names, validation_case_ids):
 
 
 # ============================================================
-# 主程序
+# Command-line entry point
 # ============================================================
 
 if __name__ == '__main__':
