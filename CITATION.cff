@@ -3,8 +3,10 @@ message: "If you use this software, please cite the associated paper and this re
 title: "Topology-Aware DeepONet for River Networks"
 type: software
 authors:
-  - name: "Project contributors"
-version: 1.0.0
+  - family-names: "Zhou"
+    given-names: "Ju"
+    email: "404426902@qq.com"
+version: 0.1.0-preview
 date-released: 2026-09-07
 license: MIT
 repository-code: "https://github.com/zhou-j0313/topology-aware-river-deeponet"

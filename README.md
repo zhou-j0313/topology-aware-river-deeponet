@@ -1,16 +1,17 @@
 # Topology-Aware DeepONet for River Networks
 
-This repository provides a public research baseline for learning unsteady-flow
+This repository provides a preview research baseline for learning unsteady-flow
 operators on branched river networks. It combines a topology-aware DeepONet
 with time-series boundary conditioning, reach-level graph message passing, and
 hard enforcement of initial, external-boundary, and junction constraints.
 
-> **Public-release note**
+> **Preview-release notice**
 >
-> The paper-specific composite loss and its weighting strategy are not included.
-> This release uses masked mean-squared error, boundary mean-squared error, and
-> a simple first-order spatiotemporal consistency regularizer. Peak and junction
-> soft-loss hooks are retained for API compatibility but disabled by default.
+> The code and data in this repository are not the complete research release.
+> The paper-specific composite loss, full implementation, complete dataset, and
+> experiment configuration will be made openly available after acceptance of
+> the associated manuscript. The current version provides a simplified baseline
+> and three representative events for documenting the workflow and data schema.
 
 ## Features
 
@@ -39,6 +40,7 @@ hard enforcement of initial, external-boundary, and junction constraints.
 |-- tests/
 |   `-- test_public_baseline.py
 |-- DATASET.md
+|-- AVAILABILITY.md
 |-- LICENSE
 |-- CITATION.cff
 |-- requirements.txt
@@ -106,6 +108,8 @@ for boundary-driven validation. Validation targets are used only for evaluation.
 All model inputs are CSV files. See [DATASET.md](DATASET.md) for schemas,
 units, and the role of each file. The bundled data intentionally excludes
 solver executables, raw solver work directories, logs, and temporary files.
+The repository currently contains only a representative subset of the research
+data. See [AVAILABILITY.md](AVAILABILITY.md) for the formal availability statement.
 
 ## Outputs
 

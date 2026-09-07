@@ -1,7 +1,9 @@
 # Dataset
 
-The repository includes three compact benchmark events for demonstrating the
-data pipeline and training workflow. All files use UTF-8 encoded CSV.
+The preview repository includes three compact representative events for
+demonstrating the data pipeline and baseline workflow. These files are a subset,
+not the complete dataset used in the associated research. All files use UTF-8
+encoded CSV.
 
 ## Network-level files
 
@@ -96,3 +98,10 @@ No claim is made that three events are sufficient for production deployment.
 They are provided to exercise the complete workflow and document the expected
 schema. Larger studies should define independent training, validation, and test
 sets and report the split explicitly.
+
+## Availability
+
+The full training, validation, and test datasets will be released in this
+repository after acceptance of the associated manuscript. The current subset
+is not intended to reproduce all results reported in the manuscript. See
+[`AVAILABILITY.md`](AVAILABILITY.md) for the formal Data Availability Statement.
