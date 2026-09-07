@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the associated paper and this repository."
+title: "Topology-Aware DeepONet for River Networks"
+type: software
+authors:
+  - name: "Project contributors"
+version: 1.0.0
+date-released: 2026-09-07
+license: MIT
+repository-code: "https://github.com/zhou-j0313/topology-aware-river-deeponet"
