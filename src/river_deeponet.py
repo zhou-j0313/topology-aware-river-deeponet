@@ -1802,11 +1802,11 @@ class RiverOperatorSurrogate(nn.Module):
             z_value = pd.to_numeric(
                 pd.Series([row['initial_water_level_m']]),
                 errors='coerce').iloc[0]
-            if pd.isna(q_value) or pd.isna(z_value):
-                continue
             for k in resolved_rows:
-                q0[k] = float(q_value)
-                z0[k] = float(z_value)
+                if not pd.isna(q_value):
+                    q0[k] = float(q_value)
+                if not pd.isna(z_value):
+                    z0[k] = float(z_value)
 
         if unresolved_identifiers:
             preview = unresolved_identifiers[:10]
@@ -1815,18 +1815,83 @@ class RiverOperatorSurrogate(nn.Module):
                 f"condition identifiers: {preview}",
                 flush=True,
             )
-        valid = ~np.isnan(z0)
-        if valid.sum() == 0:
-            return None, None
-        idx_v = np.where(valid)[0]
-        idx_m = np.where(~valid)[0]
-        if valid.sum() >= 2 and len(idx_m) > 0:
-            z0[idx_m] = np.interp(idx_m, idx_v, z0[idx_v])
-            q0[idx_m] = np.interp(idx_m, idx_v, q0[idx_v])
-        elif valid.sum() == 1 and len(idx_m) > 0:
-            z0[idx_m] = z0[idx_v[0]]
-            q0[idx_m] = q0[idx_v[0]]
-        return z0, q0
+        return (
+            z0 if np.isfinite(z0).any() else None,
+            q0 if np.isfinite(q0).any() else None,
+        )
+
+    @staticmethod
+    def _interpolate_initial_profile(values, fallback):
+        """Fill missing internal nodes by spatial interpolation of known inputs."""
+        fallback = np.asarray(fallback, dtype=float).reshape(-1)
+        if values is None:
+            values = np.full(fallback.shape, np.nan, dtype=float)
+        else:
+            values = np.asarray(values, dtype=float).reshape(-1).copy()
+        if values.shape != fallback.shape:
+            raise ValueError("Initial-state and fallback profiles must have equal size")
+
+        valid = np.isfinite(values)
+        missing = ~valid
+        if valid.sum() >= 2 and missing.any():
+            known_rows = np.flatnonzero(valid)
+            missing_rows = np.flatnonzero(missing)
+            values[missing_rows] = np.interp(
+                missing_rows, known_rows, values[known_rows])
+        elif valid.sum() == 1 and missing.any():
+            values[missing] = values[valid][0]
+        elif valid.sum() == 0:
+            values = fallback.copy()
+        return values
+
+    def _complete_initial_state(self, z0, q0, upper_data, lower_data):
+        """
+        Complete an initial state using prediction-time inputs only.
+
+        Available initial-condition records are retained. Missing internal nodes
+        are interpolated after upstream discharge and downstream stage at the
+        first time step have been inserted as boundary anchors. No target or
+        evaluation-reference value is used.
+        """
+        N = len(self.row_sec_ids)
+        z_values = (
+            np.full(N, np.nan, dtype=float)
+            if z0 is None else np.asarray(z0, dtype=float).copy())
+        q_values = (
+            np.full(N, np.nan, dtype=float)
+            if q0 is None else np.asarray(q0, dtype=float).copy())
+
+        for sec_id, item in upper_data.items():
+            q_boundary = np.asarray(item['discharge'], dtype=float)
+            if q_boundary.size == 0 or not np.isfinite(q_boundary[0]):
+                continue
+            for row in self.row_indices_by_section.get(int(sec_id), []):
+                if not np.isfinite(q_values[row]):
+                    q_values[row] = float(q_boundary[0])
+
+        for sec_id, item in lower_data.items():
+            z_boundary = np.asarray(item['water_level'], dtype=float)
+            if z_boundary.size == 0 or not np.isfinite(z_boundary[0]):
+                continue
+            for row in self.row_indices_by_section.get(int(sec_id), []):
+                if not np.isfinite(z_values[row]):
+                    z_values[row] = float(z_boundary[0])
+
+        upstream_q0 = [
+            float(np.asarray(item['discharge'], dtype=float)[0])
+            for item in upper_data.values()
+            if np.asarray(item['discharge']).size > 0
+            and np.isfinite(np.asarray(item['discharge'], dtype=float)[0])
+        ]
+        q_fallback = np.full(
+            N, float(np.mean(upstream_q0)) if upstream_q0 else 0.0)
+        z_fallback = self.z_bed_array + 1.0
+
+        z_values = self._interpolate_initial_profile(z_values, z_fallback)
+        q_values = self._interpolate_initial_profile(q_values, q_fallback)
+        # Keep interpolated stages physically above the local bed elevation.
+        z_values = np.maximum(z_values, self.z_bed_array + 1e-3)
+        return z_values, q_values
 
     def _load_single_event(self, spec):
         upper_data_raw, lower_data_raw = self._parse_boundary_file(spec.boundary_file)
@@ -1916,21 +1981,10 @@ class RiverOperatorSurrogate(nn.Module):
                     q_r[i, :] = np.interp(t_union, t_ref, q_ref[i])
             reference_z, reference_q = z_r, q_r
 
-        z0, q0 = self._parse_initial_condition_file(spec.initial_condition_file)
-        if z0 is None or q0 is None:
-            if z_target is not None and len(obs_indices) > 0:
-                if len(obs_indices) >= 2:
-                    z0 = np.interp(np.arange(N), obs_indices, z_target[obs_indices, 0])
-                else:
-                    z0 = self.z_bed_array + 1.0
-                q0 = np.repeat(q_up[0], N)
-            elif reference_z is not None and len(reference_indices) > 0:
-                # A reference at t=0 may initialize an otherwise missing state.
-                z0 = reference_z[:, 0].copy()
-                q0 = reference_q[:, 0].copy()
-            else:
-                z0 = self.z_bed_array + 1.0
-                q0 = np.repeat(q_up[0], N)
+        z0, q0 = self._parse_initial_condition_file(
+            spec.initial_condition_file)
+        z0, q0 = self._complete_initial_state(
+            z0, q0, upper_data_raw, lower_data_raw)
 
         n_obs = len(set(obs_indices))
         n_total = N
@@ -2937,7 +2991,7 @@ class RiverOperatorSurrogate(nn.Module):
                     pde_warmup_epochs=300,
                     early_stop_patience: Optional[int] = None,
                     verbose_every=50, diagnostics_file=None,
-                    val_metric_mode='reference_data', val_include_pde=False):
+                    val_metric_mode='training_mask_data', val_include_pde=False):
         if not self.prepared:
             raise RuntimeError("Call prepare_data() before training")
 
@@ -2975,7 +3029,8 @@ class RiverOperatorSurrogate(nn.Module):
         print(f"   warmup={warmup_epochs}ep", flush=True)
         print(f"   norm=affine(Q/h/source), data/bc=masked-MSE; overbank={self.overbank_mode}", flush=True)
         print(
-            f"   Validation: prediction-only inputs; mode={val_metric_mode}; "
+            "   Validation: same targets, observation mask, and masked-MSE "
+            "as training; "
             f"include_consistency={val_include_pde}", flush=True)
         if early_stop_patience is not None:
             print(f"   early stopping patience={early_stop_patience} epochs", flush=True)
@@ -3049,16 +3104,20 @@ class RiverOperatorSurrogate(nn.Module):
                         if self.boundary_hard_injection:
                             pred = self._apply_boundary_hard_injection(pred, x)
 
-                        # Validation references are never model inputs.
-                        ref_y = batch['ref_y'].to(self.device)
-                        ref_mask = batch['ref_mask'].to(self.device)
-                        if ref_mask.sum() > 0:
-                            v_h_ref = self._masked_data_loss_h(pred[:, 0], ref_y[:, 0], ref_mask)
-                            v_q_ref = self._masked_data_loss_q(pred[:, 1], ref_y[:, 1], ref_mask)
-                            v_data = lambda_h * v_h_ref + lambda_q * v_q_ref
+                        # Use exactly the same supervised targets and mask as
+                        # the training loop. Full references remain available
+                        # only for post-training evaluation and export.
+                        y = batch['y'].to(self.device)
+                        mask = batch['mask'].to(self.device)
+                        if mask.sum() > 0:
+                            v_h = self._masked_data_loss_h(
+                                pred[:, 0], y[:, 0], mask)
+                            v_q = self._masked_data_loss_q(
+                                pred[:, 1], y[:, 1], mask)
+                            v_data = lambda_h * v_h + lambda_q * v_q
                             v_z_rmse, v_q_rmse, v_physical_score = (
                                 self._masked_physical_rmse(
-                                    pred, ref_y, ref_mask)
+                                    pred, y, mask)
                             )
                             total_v_data += v_data.item()
                             total_z_rmse += v_z_rmse.item()
@@ -3073,14 +3132,16 @@ class RiverOperatorSurrogate(nn.Module):
                         v_pde = lambda_pde_cont * v_c + lambda_pde_mom * v_m
                         total_v_pde += v_pde.item()
 
-                        if str(val_metric_mode).lower() in ['reference_data', 'data', 'ref'] and ref_mask.sum() > 0:
-                            # Select the best model primarily by physical RMSE.
+                        if mask.sum() > 0:
+                            # Model selection follows the same masked data loss
+                            # used by training; consistency is optional.
                             v_metric = (
-                                v_physical_score
+                                v_data
                                 + (v_pde if val_include_pde else 0.0)
                             )
                         else:
-                            # Fall back to consistency loss without references.
+                            # Fall back only when a validation event has no
+                            # configured observations.
                             v_metric = v_pde
 
                         total_v += float(v_metric.item() if torch.is_tensor(v_metric) else v_metric)
@@ -3646,11 +3707,10 @@ if __name__ == '__main__':
         test_event_names=[]
     )
 
-    # Validation is boundary-driven; targets are used only for evaluation.
-    VAL_EVENTS_BOUNDARY_ONLY = True
-    if VAL_EVENTS_BOUNDARY_ONLY:
-        surrogate.set_events_observed_sections(
-            manual_val_event_names + case_val_names, observed_sections=[])
+    # Training and validation use the same observation-section configuration.
+    surrogate.set_events_observed_sections(
+        manual_val_event_names + case_val_names,
+        observed_sections=OBSERVED_NODES)
 
     print("\nData split:", flush=True)
     print(f"   Observed nodes: {OBSERVED_NODES}", flush=True)
@@ -3671,7 +3731,7 @@ if __name__ == '__main__':
         warmup_epochs=200, plateau_patience=100, plateau_factor=0.5,
         early_stop_patience=500,
         diagnostics_file=os.path.join(repo_root, 'training_diagnostics.xlsx'),
-        val_metric_mode='reference_data',
+        val_metric_mode='training_mask_data',
         val_include_pde=False)
 
     surrogate.save_training_results(
